@@ -23,6 +23,14 @@ protocol RecordingProvider {
     /// Default false so mocks that do not simulate capture failures stay quiet.
     var appCaptureGaveUp: Bool { get }
     var micCaptureGaveUp: Bool { get }
+
+    /// True while the app-audio tap is alive but delivering buffers whose every
+    /// sample is exactly zero — what a virtual output driver taking over the
+    /// system default looks like from here. Deliberately not folded into
+    /// `appLevelDBFS`: a live tap always carries a noise floor, so digital
+    /// silence is a verdict a dBFS threshold cannot reach without also firing
+    /// on a quiet meeting. Default false, like the flags above.
+    var appCaptureDigitallySilent: Bool { get }
 }
 
 extension RecordingProvider {
@@ -39,6 +47,10 @@ extension RecordingProvider {
     }
 
     var micCaptureGaveUp: Bool {
+        false
+    }
+
+    var appCaptureDigitallySilent: Bool {
         false
     }
 }

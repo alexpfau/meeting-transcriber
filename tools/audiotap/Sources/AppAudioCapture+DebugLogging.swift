@@ -17,8 +17,13 @@ extension AppAudioCapture {
         levelPublisher.publish(level: debugRMS.lastLevelDBFS)
     }
 
-    /// Sums squares of the interleaved Float32 buffer into the shared RMS reporter.
-    /// Called unconditionally from the IOProc; the dBFS log line is gated separately.
+    /// Sums squares of the interleaved Float32 buffer into the shared RMS reporter,
+    /// and feeds the same figures to the digital-silence watchdog. Called
+    /// unconditionally from the IOProc; the dBFS log line is gated separately.
+    ///
+    /// The watchdog rides along here rather than scanning the buffer a second
+    /// time because this sum already answers its question exactly: it is zero if
+    /// and only if every sample in the buffer is exactly zero.
     func accumulateDebugRMS(data: UnsafeMutableRawPointer, byteCount: Int) {
         let count = byteCount / MemoryLayout<Float>.size
         guard count > 0 else { return }
@@ -31,6 +36,7 @@ extension AppAudioCapture {
         }
         debugRMS.add(sumSq: sumSq, samples: count)
         debugTotalBytes += UInt64(byteCount)
+        observeForDigitalSilence(sumOfSquares: sumSq, samples: count)
     }
 
     /// Drain the 5-s throttle and emit one RMS-energy log line per tick, but

@@ -157,11 +157,17 @@
             /// the polling chain wired up to `SilentRecordingMonitor`
             /// without screenshot OCR.
             let recordingSilent: Bool
+            /// True while the app-audio tap is delivering buffers whose every
+            /// sample is exactly zero — a broken tap, not a quiet meeting.
+            /// Reported without the debounce the other two flags carry, so a
+            /// driver polling `/state` sees it within a tick of the verdict.
+            let appDigitalSilence: Bool
 
             static let inactive = Self(
                 micSilent: false,
                 appSilent: false,
                 recordingSilent: false,
+                appDigitalSilence: false,
             )
         }
 

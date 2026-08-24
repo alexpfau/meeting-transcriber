@@ -22,6 +22,10 @@ protocol AudioCapturing: AnyObject {
     var micLevelDBFS: Double { get }
     var appCaptureGaveUp: Bool { get }
     var micCaptureGaveUp: Bool { get }
+    /// True while the app-audio tap is delivering nothing but exact digital
+    /// zeros. Distinct from a low level: a live tap always carries a noise
+    /// floor, so this is the one reading that cannot be a quiet meeting.
+    var appCaptureDigitallySilent: Bool { get }
 }
 
 @available(macOS 14.2, *)

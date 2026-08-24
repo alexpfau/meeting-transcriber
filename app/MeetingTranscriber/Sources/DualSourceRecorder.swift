@@ -62,6 +62,10 @@ class DualSourceRecorder: RecordingProvider {
         captureSession?.micCaptureGaveUp ?? false
     }
 
+    var appCaptureDigitallySilent: Bool {
+        captureSession?.appCaptureDigitallySilent ?? false
+    }
+
     /// Requested app-audio capture format (what the CATap aggregate device is
     /// asked for). The device may renegotiate to another rate/channel count
     /// mid-session; `AppAudioCapture` resamples every buffer to 16 kHz mono in

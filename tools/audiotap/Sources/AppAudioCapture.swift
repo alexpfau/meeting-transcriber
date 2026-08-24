@@ -108,6 +108,30 @@ public class AppAudioCapture: @unchecked Sendable {
     /// one attempt may take before it counts as never returning.
     let restartArbiter = OSAllocatedUnfairLock(initialState: RestartArbiter())
 
+    /// Notices a tap that is alive but delivering exact digital zeros. Written
+    /// from the IOProc path (`writeQueue`) and read/reset from the main queue on
+    /// restart, hence lock-backed like the arbiter above. `internal` for the
+    /// cross-file `+Anchor` extension that owns its wiring.
+    let silentTapWatchdog = OSAllocatedUnfairLock(initialState: SilentTapWatchdog())
+
+    /// Where the anchor search stands: which candidate is in use, and which
+    /// anchor last proved it delivers audio. Lock-backed because the delivery
+    /// credit is written from the IOProc path while the cursor is moved from
+    /// the main queue.
+    let anchorSearch = OSAllocatedUnfairLock(initialState: AnchorSearch())
+
+    /// The device the tap is anchored to right now, so a nonzero buffer can be
+    /// credited to it. Separate from `anchorSearch` because the IOProc reads it
+    /// for every buffer and must not take the search lock to find out whether
+    /// there is anything to record.
+    let currentAnchorUID = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    /// How many candidates the last resolve produced, so the search knows when
+    /// it has run out of anchors to try. Main-queue and restart-queue confined,
+    /// like `deviceChangeCoordinator`: written by `resolveOutputAnchor` inside a
+    /// start attempt, read when a watchdog trip asks to advance.
+    var anchorCandidateCount = 0
+
     /// Restart attempts run here, never on the main queue. `startCapture` is a
     /// chain of HAL calls through the same coreaudiod that can stop answering,
     /// and on the main queue a stuck one takes the whole app down.
@@ -211,120 +235,6 @@ public class AppAudioCapture: @unchecked Sendable {
         installOutputDeviceChangeListener()
     }
 
-    /// Query nominal sample rate from a CoreAudio device.
-    private static func queryNominalSampleRate(deviceID: AudioObjectID) -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain,
-        )
-        var rate: Float64 = 0
-        var size = UInt32(MemoryLayout<Float64>.size)
-        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
-        if status != noErr {
-            logger.warning("queryNominalSampleRate failed (status: \(status))")
-            return 0
-        }
-        return Int(rate)
-    }
-
-    /// Query physical stream format sample rate from a CoreAudio device.
-    private static func queryStreamSampleRate(deviceID: AudioObjectID) -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioStreamPropertyPhysicalFormat,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain,
-        )
-        var asbd = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &asbd)
-        if status != noErr {
-            // Not all devices support this query — non-fatal
-            return 0
-        }
-        return Int(asbd.mSampleRate)
-    }
-
-    /// Query the tap's own format — most authoritative source for tap data rate.
-    /// Uses kAudioTapPropertyFormat which returns the ASBD the tap delivers.
-    private static func queryTapSampleRate(tapID: AudioObjectID) -> Int {
-        guard tapID != kAudioObjectUnknown else { return 0 }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain,
-        )
-        var asbd = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
-        if status != noErr {
-            logger.warning("queryTapSampleRate failed (status: \(status))")
-            return 0
-        }
-        return Int(asbd.mSampleRate)
-    }
-
-    /// Query the actual measured sample rate from a running device.
-    /// Only valid after AudioDeviceStart — returns the hardware-measured rate.
-    private static func queryActualSampleRate(deviceID: AudioObjectID) -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyActualSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain,
-        )
-        var rate: Float64 = 0
-        var size = UInt32(MemoryLayout<Float64>.size)
-        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
-        if status != noErr { return 0 }
-        return Int(rate)
-    }
-
-    /// Query, cross-validate, and return the best available sample rate for a device.
-    /// Priority: tap format > nominal rate > stream format > requested rate.
-    private static func resolveActualSampleRate(
-        deviceID: AudioObjectID,
-        tapID: AudioObjectID,
-        requestedRate: Int,
-    ) -> Int {
-        // Query the tap directly first — most authoritative. Only cross-validate
-        // nominal + stream when the tap has no rate, preserving the original
-        // short-circuit (no extra hardware queries when the tap answers).
-        let tapRate = queryTapSampleRate(tapID: tapID)
-        let nominalRate = tapRate > 0 ? 0 : queryNominalSampleRate(deviceID: deviceID)
-        let streamRate = tapRate > 0 ? 0 : queryStreamSampleRate(deviceID: deviceID)
-
-        let decision = SampleRateQuery.chooseRate(
-            tapRate: tapRate, nominalRate: nominalRate, streamRate: streamRate, requestedRate: requestedRate,
-        )
-
-        switch decision.source {
-        case .tap:
-            if decision.differsFromRequested {
-                logger.warning("Tap rate \(tapRate) Hz differs from requested \(requestedRate) Hz")
-            }
-            logger.info("Using tap format rate: \(tapRate) Hz")
-            return decision.rate
-
-        case .requestedFallback:
-            logger.warning("Cannot query sample rate, using requested \(requestedRate) Hz")
-            return decision.rate
-
-        case .mismatchPreferNominal:
-            // Prefer nominal over stream — stream on output scope can return BT HFP rate
-            logger.warning("Rate mismatch: nominal=\(nominalRate), stream=\(streamRate) — using nominal rate (stream scope may reflect BT HFP)")
-
-        case .consistent, .onlyNominal, .onlyStream:
-            break
-        }
-
-        // Cross-validated rungs (consistent / mismatch / onlyNominal / onlyStream):
-        // flag when the queried rate the ladder picked differs from requested.
-        if decision.differsFromRequested {
-            logger.warning("Aggregate device rate \(decision.rate) Hz differs from requested \(requestedRate) Hz")
-        }
-        return decision.rate
-    }
-
     // swiftlint:disable:next function_body_length
     private func startCapture() throws -> AppTapSession {
         let translated = try translatePIDs()
@@ -349,25 +259,14 @@ public class AppAudioCapture: @unchecked Sendable {
             }
         }
 
-        // Get default output device UID
-        guard let systemOutputUID = getDefaultOutputDeviceUID() else {
+        // Choose what the aggregate device clocks against. Not simply the system
+        // default output: a virtual driver that has made itself the default
+        // yields a tap that reports a healthy rate and delivers exact digital
+        // zeros forever. See `resolveOutputAnchor` in `+Anchor`.
+        guard let anchorUID = resolveOutputAnchor() else {
             throw NSError(
                 domain: "audiotap", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Cannot get default output device UID"],
-            )
-        }
-        // Transport type is logged unconditionally (not personal data, unlike
-        // the device name/UID): a "Virtual"/"Aggregate" transport is the first
-        // sign that a third-party audio tool has interposed on the output and
-        // the process tap may capture silence (issue #524).
-        let transport = getDefaultOutputDeviceTransportType() ?? "?"
-        logger.info("System output device: \(systemOutputUID) transport=\(transport, privacy: .public)")
-
-        if debugLogging {
-            let deviceName = getDefaultOutputDeviceName() ?? "?"
-            let deviceRate = getDefaultOutputDeviceSampleRate() ?? 0
-            logger.info(
-                "[debug] Default output device: name=\(deviceName, privacy: .public) uid=\(systemOutputUID, privacy: .public) transport=\(transport, privacy: .public) rate=\(deviceRate, privacy: .public)",
             )
         }
 
@@ -411,7 +310,7 @@ public class AppAudioCapture: @unchecked Sendable {
 
         let desc = Self.aggregateDescription(
             nameTag: pids.first.map(String.init) ?? "0",
-            outputUID: systemOutputUID,
+            outputUID: anchorUID,
             tapUUID: tap.uuid.uuidString,
         )
 
@@ -421,6 +320,12 @@ public class AppAudioCapture: @unchecked Sendable {
         )
         guard aggStatus == noErr else {
             session.destroy()
+            // Named explicitly because this is the one way the anchor guard can
+            // make things worse than the silence it prevents: an anchor the HAL
+            // refuses costs the app track outright rather than degrading it.
+            logger.error(
+                "Failed to create the aggregate device around the chosen anchor (status: \(aggStatus, privacy: .public))",
+            )
             throw NSError(
                 domain: "audiotap", code: Int(aggStatus),
                 userInfo: [
@@ -551,6 +456,10 @@ public class AppAudioCapture: @unchecked Sendable {
         tapSession?.destroy()
         tapSession = nil
         didLogFormat = false
+        // After the drain, so no in-flight buffer can re-open the run we just
+        // closed. Every restart path funnels through here, which is why the
+        // reset lives at the teardown rather than at each caller.
+        silentTapWatchdog.withLock { $0.resetRun() }
     }
 
     public func stop() {

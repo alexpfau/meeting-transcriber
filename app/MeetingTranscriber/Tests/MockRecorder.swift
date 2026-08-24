@@ -43,6 +43,9 @@ class MockRecorder: RecordingProvider {
     /// false, matching the protocol's default, so existing tests are unaffected.
     var micCaptureGaveUp = false
     var appCaptureGaveUp = false
+    /// Whether the app-audio tap is delivering literal digital zeros. Default
+    /// false, matching the protocol's default.
+    var appCaptureDigitallySilent = false
 
     /// Overrides the `recordingStartDate` `stop()` reports. `nil` (default)
     /// yields `Date()` at stop time, matching a real recorder; set it to pin a

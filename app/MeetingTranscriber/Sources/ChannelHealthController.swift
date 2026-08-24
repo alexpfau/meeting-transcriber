@@ -1,6 +1,14 @@
 import AudioTapLib
 import Foundation
 import Observation
+import os.log
+
+/// Channel-health events go to the same subsystem `PersistentDiagnosticLog`
+/// mirrors to `~/Library/Logs/MeetingTranscriber/`, so a recording that lost a
+/// channel leaves a record the user can export afterwards. Until this existed
+/// the controller logged nothing at all, and whether it had fired during a bad
+/// recording was simply unknowable after the fact.
+private let logger = Logger(subsystem: "com.meetingtranscriber", category: "ChannelHealth")
 
 // MARK: - ChannelHealthController
 
@@ -43,6 +51,20 @@ final class ChannelHealthController {
     /// the menu-bar **full red** waveform (both halves tinted simultaneously).
     private(set) var recordingSilentActive: Bool = false
 
+    /// True while the app-audio tap is delivering literal digital zeros.
+    ///
+    /// Deliberately outside the two monitors above rather than routed through
+    /// them. Both of those exist to separate a broken channel from a quiet one,
+    /// which is a genuinely ambiguous question, so both spend a 90-second
+    /// debounce and — for the asymmetric monitor — require the *other* channel
+    /// to be carrying speech before they will say anything. That is the right
+    /// caution for a level reading and exactly the wrong caution here: a tap
+    /// reading not one nonzero sample has no benign reading to wait for, and
+    /// the confirmation it would wait for never came in the recording that
+    /// prompted this (the user was listening, so his microphone was near-silent
+    /// too, and the trigger reset every time it approached the window).
+    private(set) var appDigitalSilenceActive: Bool = false
+
     /// Pure state machine driven by the 10-Hz level poll while recording. Lives
     /// here (not on WatchLoop) so its lifecycle outlasts a single recording —
     /// observers of `micSilentActive` / `appSilentActive` keep their identity across the
@@ -78,7 +100,7 @@ final class ChannelHealthController {
     /// Red tint for the menu bar's **bottom** half. See `micSilentOverlay` for
     /// why the flags are read before the topology is consulted.
     var appSilentOverlay: Bool {
-        let silent = appSilentActive || recordingSilentActive
+        let silent = appSilentActive || recordingSilentActive || appDigitalSilenceActive
         return channels.app && silent
     }
 
@@ -138,6 +160,7 @@ final class ChannelHealthController {
         micSilentActive = false
         appSilentActive = false
         recordingSilentActive = false
+        appDigitalSilenceActive = false
         // Per-recording state like the flags above. Defensive rather than
         // load-bearing: every `start` sets the topology before its own guards,
         // so no reader can reach a stale value. Deliberately untested for that
@@ -182,6 +205,8 @@ final class ChannelHealthController {
         let mic = recorder.micLevelDBFS
         let app = recorder.appLevelDBFS
 
+        applyDigitalSilence(recorder.appCaptureDigitallySilent)
+
         let event = channelHealthMonitor.update(micDBFS: mic, appDBFS: app, now: now)
         switch event {
         case let .started(channel, _):
@@ -196,20 +221,39 @@ final class ChannelHealthController {
             }
             let gaveUp = channel == .mic ? recorder.micCaptureGaveUp : recorder.appCaptureGaveUp
             let alert = Self.captureAlert(channel: channel, gaveUp: gaveUp)
+            logger.error(
+                "Asymmetric silence on the \(String(describing: channel), privacy: .public) channel (gaveUp=\(gaveUp, privacy: .public), mic=\(mic, privacy: .public) dBFS, app=\(app, privacy: .public) dBFS)",
+            )
             notifier.notify(title: alert.title, body: alert.body, urgency: alert.urgency)
 
-        case .recovered:
+        case let .recovered(channel):
             micSilentActive = false
             appSilentActive = false
+            logger.info(
+                "The \(String(describing: channel), privacy: .public) channel is carrying audio again",
+            )
 
         case .none:
             break
         }
 
         let silentEvent = silentRecordingMonitor.update(micDBFS: mic, appDBFS: app, now: now)
+        applySilentRecording(silentEvent, mic: mic, app: app)
+
+        return event
+    }
+
+    /// Handle the symmetric-silence monitor's verdict. Split from `applyTick`
+    /// purely for length; it has no callers of its own.
+    private func applySilentRecording(
+        _ silentEvent: SilentRecordingEvent?, mic: Double, app: Double,
+    ) {
         switch silentEvent {
         case .started:
             recordingSilentActive = true
+            logger.error(
+                "Every channel this recording opened has stayed at the noise floor (mic=\(mic, privacy: .public) dBFS, app=\(app, privacy: .public) dBFS)",
+            )
             notifier.notify(
                 title: "Recording Appears Silent",
                 body: Self.silentRecordingMessage(for: channels),
@@ -221,13 +265,61 @@ final class ChannelHealthController {
 
         case .recovered:
             recordingSilentActive = false
+            logger.info("The recording is carrying audio again")
 
         case .none:
             break
         }
-
-        return event
     }
+
+    /// Report the tap's digital-silence verdict on its rising and falling edge.
+    ///
+    /// No debounce and no cross-channel confirmation, unlike everything else in
+    /// this controller — see `appDigitalSilenceActive` for why. The verdict
+    /// arrives already debounced anyway: the watchdog behind it only says yes
+    /// after an unbroken run of all-zero buffers lasting far longer than any
+    /// gap a working tap has been seen to produce.
+    private func applyDigitalSilence(_ digitallySilent: Bool) {
+        guard digitallySilent != appDigitalSilenceActive else { return }
+        appDigitalSilenceActive = digitallySilent
+        guard digitallySilent else {
+            logger.info("App-audio tap is delivering signal again")
+            return
+        }
+        logger.error("App-audio tap is delivering digital silence — every captured sample is exactly zero")
+        notifier.notify(
+            title: "App Audio Is Not Being Captured",
+            body: Self.digitalSilenceMessage,
+            // Never suppressible. Every other alert here has a benign reading
+            // this one does not: a tap that is running still carries a noise
+            // floor, so literal zeros mean the app track is being lost right
+            // now, and the recording cannot be repeated afterwards.
+            urgency: .timeSensitive,
+        )
+    }
+
+    /// What to tell the user about a tap that is running and capturing nothing.
+    ///
+    /// The advice names the virtual audio device because that is what the field
+    /// evidence establishes: a meeting app made its own loopback driver the
+    /// system default output while rendering the call somewhere else, and the
+    /// tap follows the default. It says the app is *trying another device*
+    /// rather than telling the user to act, because that is literally what
+    /// happens next — this notification and the anchor advance are triggered by
+    /// the same verdict.
+    ///
+    /// Deliberately does not name a feature or a workflow as the trigger. What
+    /// puts a machine into this state is not established, and a wrong guess
+    /// here sends the user to change something that has nothing to do with it.
+    /// It also does not claim a virtual device is *the* cause: recordings made
+    /// through one are usually fine, since most apps render into whatever the
+    /// default is.
+    nonisolated static let digitalSilenceMessage =
+        "The meeting app's audio is being captured as pure silence. This usually means the app is "
+            + "playing to one audio device while a different one — often a virtual device from "
+            + "Loopback, SoundSource or Audio Hijack, or a meeting app's own loopback driver — is "
+            + "the system output. Trying the next audio device automatically; if the app track "
+            + "stays silent, select a physical output device in System Settings › Sound."
 
     /// The whole notification for an asymmetric-silence episode: title, body and
     /// whether it may break through a Focus mode. One function because all three
