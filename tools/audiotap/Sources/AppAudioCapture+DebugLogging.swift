@@ -18,12 +18,13 @@ extension AppAudioCapture {
     }
 
     /// Sums squares of the interleaved Float32 buffer into the shared RMS reporter,
-    /// and feeds the same figures to the digital-silence watchdog. Called
-    /// unconditionally from the IOProc; the dBFS log line is gated separately.
+    /// and feeds the digital-silence detector an exact count of zero samples.
+    /// Called unconditionally from the IOProc; the dBFS log line is gated separately.
     ///
-    /// The watchdog rides along here rather than scanning the buffer a second
-    /// time because this sum already answers its question exactly: it is zero if
-    /// and only if every sample in the buffer is exactly zero.
+    /// Both figures come from one pass. The zero count could in principle be
+    /// inferred from the sum — it is zero only when every sample is — but that
+    /// inference is too coarse for the detector's threshold, which is measured
+    /// per sample rather than per buffer. See `exactlyZeroSampleCount`.
     func accumulateDebugRMS(data: UnsafeMutableRawPointer, byteCount: Int) {
         let count = byteCount / MemoryLayout<Float>.size
         guard count > 0 else { return }
@@ -31,12 +32,14 @@ extension AppAudioCapture {
             start: data.assumingMemoryBound(to: Float.self), count: count,
         )
         var sumSq: Double = 0
+        var zeros = 0
         for sample in buf {
             sumSq += Double(sample) * Double(sample)
+            if sample == 0 { zeros += 1 }
         }
         debugRMS.add(sumSq: sumSq, samples: count)
         debugTotalBytes += UInt64(byteCount)
-        observeForDigitalSilence(sumOfSquares: sumSq, samples: count)
+        observeForDigitalSilence(zeroSamples: zeros, samples: count)
     }
 
     /// Drain the 5-s throttle and emit one RMS-energy log line per tick, but

@@ -59,6 +59,19 @@ enum OutputDeviceAnchorPolicy {
         let name: String
         /// Raw `kAudioDevicePropertyTransportType` value.
         let transportType: UInt32
+        /// Whether any process currently has IO running on this device
+        /// (`kAudioDevicePropertyDeviceIsRunningSomewhere`).
+        ///
+        /// Defaulted so the many call sites that only care about ordering by
+        /// transport do not have to state it.
+        let isRunningIO: Bool
+
+        init(uid: String, name: String, transportType: UInt32, isRunningIO: Bool = false) {
+            self.uid = uid
+            self.name = name
+            self.transportType = transportType
+            self.isRunningIO = isRunningIO
+        }
     }
 
     /// Why a candidate is in the list at the position it holds. Logged on every
@@ -115,12 +128,12 @@ enum OutputDeviceAnchorPolicy {
         outputDevices: [Device],
         lastKnownGoodUID: String?,
     ) -> [Candidate] {
-        var result = [Candidate(uid: defaultDevice.uid, reason: .systemDefault)]
+        var fallbacks: [Candidate] = []
         var seen: Set<String> = [defaultDevice.uid]
 
         func append(_ uid: String, _ reason: Reason) {
             guard seen.insert(uid).inserted else { return }
-            result.append(Candidate(uid: uid, reason: reason))
+            fallbacks.append(Candidate(uid: uid, reason: reason))
         }
 
         if let lastKnownGoodUID, outputDevices.contains(where: { $0.uid == lastKnownGoodUID }) {
@@ -134,6 +147,37 @@ enum OutputDeviceAnchorPolicy {
         for device in physical {
             append(device.uid, .physicalFallback)
         }
-        return result
+
+        return [Candidate(uid: defaultDevice.uid, reason: .systemDefault)]
+            + prioritizingRunningIO(fallbacks, among: outputDevices)
+    }
+
+    /// Move devices that currently have IO running to the front of the
+    /// fallbacks, preserving the existing order within each group.
+    ///
+    /// This is the signal that was missing when two recordings were lost to a
+    /// fallback that guessed wrong: the meeting app had stopped playing to the
+    /// system default and started playing to the headphones, and the watchdog
+    /// then advanced to built-in speakers, where nothing was playing either.
+    /// Running IO points straight at where the audio went.
+    ///
+    /// **Deliberately does not touch position 0.** The system default leads
+    /// whatever its running state, which is what makes a default the app *is*
+    /// rendering into behave exactly as it did before any of this existed. The
+    /// signal is also not clean enough to lead with: on one measured incident
+    /// the meeting app's loopback device and the headphones were running IO
+    /// simultaneously, so "running" alone cannot name the winner. Ordering the
+    /// fallbacks costs nothing if it is wrong — the search simply moves on —
+    /// while promoting above the default could lose a working recording.
+    private static func prioritizingRunningIO(
+        _ candidates: [Candidate], among devices: [Device],
+    ) -> [Candidate] {
+        let running = Set(devices.filter(\.isRunningIO).map(\.uid))
+        guard !running.isEmpty else { return candidates }
+        // A stable partition, not a sort: within each group the reason ordering
+        // above still decides, so a known-good device stays ahead of untried
+        // hardware that happens to share its running state.
+        return candidates.filter { running.contains($0.uid) }
+            + candidates.filter { !running.contains($0.uid) }
     }
 }

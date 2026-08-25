@@ -37,6 +37,7 @@ enum OutputDeviceEnumeration {
             uid: uid,
             name: readCFStringAudioProperty(deviceID, kAudioObjectPropertyName) ?? "?",
             transportType: transportType(deviceID) ?? 0,
+            isRunningIO: isRunningSomewhere(deviceID),
         )
     }
 
@@ -75,6 +76,7 @@ enum OutputDeviceEnumeration {
             uid: uid,
             name: readCFStringAudioProperty(deviceID, kAudioObjectPropertyName) ?? "?",
             transportType: transportType(deviceID) ?? 0,
+            isRunningIO: isRunningSomewhere(deviceID),
         )
     }
 
@@ -103,6 +105,38 @@ enum OutputDeviceEnumeration {
             raw.assumingMemoryBound(to: AudioBufferList.self),
         )
         return list.contains { $0.mNumberChannels > 0 }
+    }
+
+    /// Whether any process on the system currently has IO running on this
+    /// device.
+    ///
+    /// The one signal that distinguishes "the app plays here" from "the app
+    /// merely could play here", and the piece missing when two recordings were
+    /// lost to a fallback that guessed wrong. The unified log for one of them
+    /// shows the meeting app calling `setPlayState Stopped` on the system
+    /// default and `setPlayState Started` on the headphones eleven seconds
+    /// before capture began; this property reports exactly that difference.
+    ///
+    /// Reported per device rather than per process — it says *someone* is
+    /// running IO, not who — which is why it orders fallbacks instead of
+    /// choosing the anchor outright. On one measured incident the meeting app's
+    /// loopback device and the headphones were both running IO at once.
+    ///
+    /// A failed query reads as false: an unknown device is not evidence of
+    /// anything, and treating it as running would promote it over devices that
+    /// answered honestly.
+    private static func isRunningSomewhere(_ deviceID: AudioObjectID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        )
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &running) == noErr else {
+            return false
+        }
+        return running != 0
     }
 
     private static func transportType(_ deviceID: AudioObjectID) -> UInt32? {

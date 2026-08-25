@@ -120,6 +120,11 @@ public class AppAudioCapture: @unchecked Sendable {
     /// the main queue.
     let anchorSearch = OSAllocatedUnfairLock(initialState: AnchorSearch())
 
+    /// Decides when the current anchor has carried enough real audio to be
+    /// remembered as good. Written from the IOProc path and reset from the main
+    /// queue on teardown, hence lock-backed like the watchdog above.
+    let deliveryCredit = OSAllocatedUnfairLock(initialState: AnchorDeliveryCredit())
+
     /// The device the tap is anchored to right now, so a nonzero buffer can be
     /// credited to it. Separate from `anchorSearch` because the IOProc reads it
     /// for every buffer and must not take the search lock to find out whether
@@ -456,10 +461,13 @@ public class AppAudioCapture: @unchecked Sendable {
         tapSession?.destroy()
         tapSession = nil
         didLogFormat = false
-        // After the drain, so no in-flight buffer can re-open the run we just
-        // closed. Every restart path funnels through here, which is why the
-        // reset lives at the teardown rather than at each caller.
-        silentTapWatchdog.withLock { $0.resetRun() }
+        // After the drain, so no in-flight buffer can pool into the window we
+        // just closed. Every restart path funnels through here, which is why
+        // the reset lives at the teardown rather than at each caller. Both
+        // measurements are dropped: buffers from the next anchor must not be
+        // judged against evidence gathered at the previous one.
+        silentTapWatchdog.withLock { $0.resetWindow() }
+        deliveryCredit.withLock { $0.reset() }
     }
 
     public func stop() {

@@ -33,9 +33,10 @@ extension AppAudioCapture {
         guard let currentDefault = OutputDeviceEnumeration.defaultOutputDevice() else { return nil }
         let transport = OutputDeviceEnumeration.transportLabel(currentDefault.transportType)
 
+        let devices = OutputDeviceEnumeration.outputDevices()
         let candidates = OutputDeviceAnchorPolicy.candidates(
             defaultDevice: currentDefault,
-            outputDevices: OutputDeviceEnumeration.outputDevices(),
+            outputDevices: devices,
             lastKnownGoodUID: anchorSearch.withLock(\.lastKnownGoodUID),
         )
         anchorCandidateCount = candidates.count
@@ -52,6 +53,7 @@ extension AppAudioCapture {
             "System output device: \(currentDefault.uid) transport=\(transport, privacy: .public)",
         )
         logAnchorSelection(selection, candidateCount: candidates.count)
+        logRunningIO(devices)
 
         // The anchor has to be recorded before any buffer arrives: it is what a
         // delivery gets credited to.
@@ -88,6 +90,24 @@ extension AppAudioCapture {
         )
     }
 
+    /// Record which devices currently have IO running, at the moment the anchor
+    /// was chosen.
+    ///
+    /// Evidence-gathering as much as diagnostics. Running IO now orders the
+    /// fallbacks but deliberately cannot outrank the system default, because on
+    /// one measured incident two devices were running at once and the signal
+    /// could not name a winner. Logging it on every attempt is what will decide
+    /// whether it is ever trustworthy enough to lead. Device UIDs are already
+    /// logged on the line above, so this adds no new identifying data.
+    private func logRunningIO(_ devices: [OutputDeviceAnchorPolicy.Device]) {
+        let running = devices.filter(\.isRunningIO).map(\.uid).joined(separator: ", ")
+        guard !running.isEmpty else {
+            logger.info("App audio: no output device reports running IO")
+            return
+        }
+        logger.info("App audio: output devices running IO: [\(running, privacy: .public)]")
+    }
+
     /// True while the tap is delivering buffers whose every sample is exactly
     /// zero. Polled by the app at the same cadence as the per-channel levels;
     /// see `SilentTapWatchdog` for why exact zero rather than a quiet threshold.
@@ -98,24 +118,26 @@ extension AppAudioCapture {
     /// Feed one captured buffer's energy to the watchdog. Called from the
     /// IOProc path (on `writeQueue`) for every buffer; the locks are what let
     /// the main queue reset the run when the tap is torn down for a restart.
-    func observeForDigitalSilence(sumOfSquares: Double, samples: Int) {
-        if sumOfSquares > 0 { creditDeliveryToCurrentAnchor() }
+    func observeForDigitalSilence(zeroSamples: Int, samples: Int) {
+        let now = machTicksToSeconds(mach_absolute_time())
+        let earnedCredit = deliveryCredit.withLock { credit in
+            credit.observe(zeroSamples: zeroSamples, samples: samples, now: now)
+        }
+        if earnedCredit { creditDeliveryToCurrentAnchor() }
 
         let action = silentTapWatchdog.withLock { watchdog in
-            watchdog.observe(
-                sumOfSquares: sumOfSquares,
-                samples: samples,
-                now: machTicksToSeconds(mach_absolute_time()),
-            )
+            watchdog.observe(zeroSamples: zeroSamples, samples: samples, now: now)
         }
         switch action {
         case .none:
             break
 
         case let .silenceDetected(mayRestart):
-            let seconds = silentTapWatchdog.withLock(\.zeroRunSeconds)
+            let (seconds, share) = silentTapWatchdog.withLock { watchdog in
+                (watchdog.windowSeconds, Int(watchdog.zeroFractionThreshold * 100))
+            }
             logger.error(
-                "App audio: tap delivered nothing but digital silence for \(seconds, privacy: .public)s at the current anchor",
+                "App audio: over \(share, privacy: .public)% of the last \(seconds, privacy: .public)s captured at the current anchor was digital silence",
             )
             guard mayRestart else {
                 logger.error(
@@ -134,10 +156,11 @@ extension AppAudioCapture {
 
     /// Note that audio genuinely arrived at whatever the tap is anchored to.
     ///
-    /// Runs for every nonzero buffer of a healthy recording, so the fast path is
-    /// two uncontended lock acquisitions and a string compare that fails
-    /// immediately. Doing it here rather than on a timer is what keeps "known
-    /// good" meaning *delivered*, which is the entire basis of the search.
+    /// Reached only when `AnchorDeliveryCredit` says a completed interval was
+    /// substantially non-silent, never on a lone nonzero sample — see that type
+    /// for why the difference cost a recording. Doing it from the buffer path
+    /// rather than on a timer is what keeps "known good" meaning *delivered*,
+    /// which is the entire basis of the search.
     private func creditDeliveryToCurrentAnchor() {
         guard let uid = currentAnchorUID.withLock({ $0 }) else { return }
         anchorSearch.withLock { $0.recordDelivery(at: uid) }

@@ -10,9 +10,11 @@ import XCTest
 /// broke case 2, and no property of the device distinguishes them.
 final class OutputDeviceAnchorPolicyTests: XCTestCase {
     private func device(
-        _ uid: String, _ name: String, _ transport: UInt32,
+        _ uid: String, _ name: String, _ transport: UInt32, running: Bool = false,
     ) -> OutputDeviceAnchorPolicy.Device {
-        OutputDeviceAnchorPolicy.Device(uid: uid, name: name, transportType: transport)
+        OutputDeviceAnchorPolicy.Device(
+            uid: uid, name: name, transportType: transport, isRunningIO: running,
+        )
     }
 
     private var airPods: OutputDeviceAnchorPolicy.Device {
@@ -204,5 +206,102 @@ final class OutputDeviceAnchorPolicyTests: XCTestCase {
             defaultDevice: teamsLoopback, outputDevices: allDevices, lastKnownGoodUID: nil,
         )
         XCTAssertFalse(candidates.contains { $0.uid == studioDisplaySurround.uid })
+    }
+
+    // MARK: - Running IO
+
+    /// The signal that was missing when two recordings were lost. The meeting
+    /// app had stopped playing to the system default and started playing to the
+    /// headphones; the search advanced to built-in speakers, where nothing was
+    /// playing either.
+    func testARunningDeviceLeadsTheFallbacks() {
+        let runningAirPods = device(
+            "AirPodsPro3-UID", "AirPods Pro 3", kAudioDeviceTransportTypeBluetooth, running: true,
+        )
+        let candidates = OutputDeviceAnchorPolicy.candidates(
+            defaultDevice: teamsLoopback,
+            outputDevices: [builtIn, runningAirPods, teamsLoopback],
+            lastKnownGoodUID: nil,
+        )
+        XCTAssertEqual(candidates[0].uid, teamsLoopback.uid)
+        XCTAssertEqual(
+            candidates[1].uid, runningAirPods.uid,
+            "a device with IO running is where the audio actually went",
+        )
+    }
+
+    /// Position 0 is the zero-regression guarantee and must not be traded away:
+    /// a default the app IS rendering into has to behave exactly as it always
+    /// did, and the running signal is not clean enough to lead with — on one
+    /// measured incident two devices were running at once.
+    func testTheSystemDefaultLeadsEvenWhenItIsNotRunningIO() {
+        let runningAirPods = device(
+            "AirPodsPro3-UID", "AirPods Pro 3", kAudioDeviceTransportTypeBluetooth, running: true,
+        )
+        let idleDefault = device(
+            "StudioDisplaySurround-UID", "Studio Display Surround",
+            kAudioDeviceTransportTypeVirtual, running: false,
+        )
+        let candidates = OutputDeviceAnchorPolicy.candidates(
+            defaultDevice: idleDefault,
+            outputDevices: [builtIn, runningAirPods, idleDefault],
+            lastKnownGoodUID: nil,
+        )
+        XCTAssertEqual(candidates[0], .init(uid: idleDefault.uid, reason: .systemDefault))
+    }
+
+    /// Within each running group the reason ordering still decides, so this is
+    /// a stable partition rather than a sort.
+    func testRunningPartitionPreservesReasonOrderWithinEachGroup() {
+        let runningAirPods = device(
+            "AirPodsPro3-UID", "AirPods Pro 3", kAudioDeviceTransportTypeBluetooth, running: true,
+        )
+        let runningUSB = device(
+            "UsbInterface-UID", "Scarlett 2i2", kAudioDeviceTransportTypeUSB, running: true,
+        )
+        let candidates = OutputDeviceAnchorPolicy.candidates(
+            defaultDevice: teamsLoopback,
+            outputDevices: [builtIn, runningAirPods, runningUSB, teamsLoopback],
+            lastKnownGoodUID: runningUSB.uid,
+        )
+        // Both are running, so lastKnownGood still outranks untried hardware.
+        XCTAssertEqual(candidates[1], .init(uid: runningUSB.uid, reason: .lastKnownGood))
+        XCTAssertEqual(candidates[2].uid, runningAirPods.uid)
+        XCTAssertEqual(candidates.last?.uid, builtIn.uid, "the idle device sinks to the back")
+    }
+
+    func testOrderIsUnchangedWhenNothingReportsRunningIO() {
+        let candidates = OutputDeviceAnchorPolicy.candidates(
+            defaultDevice: teamsLoopback, outputDevices: allDevices, lastKnownGoodUID: nil,
+        )
+        XCTAssertEqual(candidates.map(\.uid), [teamsLoopback.uid, builtIn.uid, airPods.uid])
+    }
+
+    /// Today's incident, end to end: Teams stopped playing to the system
+    /// default and started playing to the AirPods eleven seconds before capture
+    /// began. The first fallback must be the AirPods, not built-in speakers.
+    func testTodaysIncidentReachesTheDeviceTeamsIsPlayingTo() {
+        let idleDefault = device(
+            "StudioDisplaySurround-UID", "Studio Display Surround",
+            kAudioDeviceTransportTypeVirtual, running: false,
+        )
+        let runningAirPods = device(
+            "20-F4-D4-4D-7F-DF:output", "AirPods Pro 3",
+            kAudioDeviceTransportTypeBluetooth, running: true,
+        )
+        let candidates = OutputDeviceAnchorPolicy.candidates(
+            defaultDevice: idleDefault,
+            outputDevices: [builtIn, runningAirPods, idleDefault],
+            lastKnownGoodUID: nil,
+        )
+        var search = AnchorSearch()
+        XCTAssertEqual(search.selection(from: candidates)?.candidate.uid, idleDefault.uid)
+
+        // The watchdog proves the default dead, and the search advances once.
+        XCTAssertTrue(search.advance(candidateCount: candidates.count))
+        XCTAssertEqual(
+            search.selection(from: candidates)?.candidate.uid, runningAirPods.uid,
+            "one advance must reach the device Teams is actually rendering to",
+        )
     }
 }
