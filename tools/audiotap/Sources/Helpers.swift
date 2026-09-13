@@ -241,7 +241,9 @@ func getDefaultOutputDeviceTransportType() -> String? {
     return transportTypeNames[raw] ?? "Unknown(\(raw))"
 }
 
-private let transportTypeNames: [UInt32: String] = [
+/// Module-internal (not file-private) so `OutputDeviceEnumeration` can label the
+/// transport of *any* device, not just the default output.
+let transportTypeNames: [UInt32: String] = [
     kAudioDeviceTransportTypeBuiltIn: "Built-In",
     kAudioDeviceTransportTypeUSB: "USB",
     kAudioDeviceTransportTypeBluetooth: "Bluetooth",
