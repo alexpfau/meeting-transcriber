@@ -128,8 +128,7 @@ struct SilentTapWatchdog: Equatable {
     ///
     /// - Parameters:
     ///   - zeroSamples: how many of that buffer's samples were exactly zero,
-    ///     counted by `exactlyZeroSampleCount` in the capture path's existing
-    ///     per-sample loop.
+    ///     counted in the capture path's existing RMS loop.
     ///   - samples: how many samples that buffer held.
     ///   - now: monotonic seconds. Injected rather than read here so the whole
     ///     transition table is testable without waiting out a real window.
@@ -159,11 +158,6 @@ struct SilentTapWatchdog: Equatable {
         guard triggersFired < maxTriggers else { return .silenceDetected(mayRestart: false) }
         triggersFired += 1
         return .silenceDetected(mayRestart: true)
-    }
-
-    /// How many anchor moves this watchdog has authorized. Surfaced for logging.
-    var restartsRequested: Int {
-        triggersFired
     }
 
     /// Drop the measurement window without touching the trigger budget or the

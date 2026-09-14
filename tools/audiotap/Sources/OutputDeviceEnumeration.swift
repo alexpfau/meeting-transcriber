@@ -49,8 +49,7 @@ enum OutputDeviceEnumeration {
         )
     }
 
-    /// Short transport label for logs, e.g. "Virtual" or "Built-In". Shared with
-    /// `getDefaultOutputDeviceTransportType` so the two never drift.
+    /// Short transport label for logs, e.g. "Virtual" or "Built-In".
     static func transportLabel(_ raw: UInt32) -> String {
         transportTypeNames[raw] ?? "Unknown(\(raw))"
     }

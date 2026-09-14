@@ -1,3 +1,5 @@
+import AudioTapLib
+
 /// Notification copy and urgency, separate from channel-health polling and
 /// per-recording state. These pure helpers also serve the message-policy tests.
 extension ChannelHealthController {
@@ -199,4 +201,3 @@ extension ChannelHealthController {
         }
     }
 }
-import AudioTapLib

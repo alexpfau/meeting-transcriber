@@ -1,27 +1,5 @@
 import Foundation
 
-/// Exact count of zero samples in an interleaved Float32 buffer.
-///
-/// Counted per sample rather than inferred from the buffer's summed squares,
-/// which is what an earlier version did — a buffer was taken as entirely
-/// non-zero whenever it held any signal at all. That approximation is not good
-/// enough here, and the arithmetic says so: on the 44.7-minute call this
-/// criterion was built from, 55 of 530 five-second windows carried some energy,
-/// so the approximation bottoms out at 1 - 55/530 = 0.896 zeros — just under
-/// the 0.90 trip threshold, on the exact recording the threshold was measured
-/// from. Counting properly is what makes the measured populations comparable to
-/// what this code sees.
-///
-/// Costs one comparison per sample, inside a loop the capture path already runs
-/// to accumulate RMS energy.
-func exactlyZeroSampleCount(_ buffer: UnsafeBufferPointer<Float>) -> Int {
-    var zeros = 0
-    for sample in buffer where sample == 0 {
-        zeros += 1
-    }
-    return zeros
-}
-
 /// What fraction of the samples in the last `windowSeconds` were exactly zero.
 ///
 /// Split from `SilentTapWatchdog` so the windowing is testable apart from the
