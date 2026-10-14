@@ -157,7 +157,7 @@
             /// the polling chain wired up to `SilentRecordingMonitor`
             /// without screenshot OCR.
             let recordingSilent: Bool
-            /// The capture layer's rolling verdict of mostly exact-zero
+            /// The capture layer's rolling verdict of mostly zero
             /// samples. Reported without additional debounce or microphone
             /// corroboration; false again when the rolling window recovers.
             let appDigitalSilence: Bool

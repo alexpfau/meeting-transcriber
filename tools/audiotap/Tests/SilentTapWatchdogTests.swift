@@ -272,4 +272,55 @@ final class SilentTapWatchdogTests: XCTestCase {
         XCTAssertNil(watchdog.observe(zeroSamples: 64, samples: 64, now: 130))
         XCTAssertFalse(watchdog.isSilent)
     }
+
+    // MARK: - What counts as a zero sample
+
+    /// Sum of squares of `bufferSamples` samples at a constant magnitude.
+    private func sumOfSquares(atDBFS dBFS: Double) -> Double {
+        let amplitude = pow(10, dBFS / 20)
+        return Double(bufferSamples) * amplitude * amplitude
+    }
+
+    func testTheFloorIsOneSixteenBitStep() {
+        XCTAssertEqual(SilentTapWatchdog.zeroFloorRMS * 32768, 1)
+        XCTAssertEqual(20 * log10(SilentTapWatchdog.zeroFloorRMS), -90.31, accuracy: 0.01)
+    }
+
+    /// Issue #699's reading: no exact zero anywhere, below one step throughout.
+    func testABufferBelowOneSixteenBitStepCountsAsZeroThroughout() {
+        let count = SilentTapWatchdog.zeroSampleCount(
+            exactZeros: 0, samples: bufferSamples, sumOfSquares: sumOfSquares(atDBFS: -98.5),
+        )
+        XCTAssertEqual(count, bufferSamples)
+    }
+
+    /// Audible audio, however quiet, is judged sample by sample as before. The
+    /// step itself is computed exactly (it is a power of two), so the boundary
+    /// case is not at the mercy of a log/exp round trip.
+    func testABufferAtOrAboveTheStepKeepsItsExactCount() {
+        let atTheStep = Double(bufferSamples) * SilentTapWatchdog.zeroFloorRMS * SilentTapWatchdog.zeroFloorRMS
+        for sumSq in [atTheStep, sumOfSquares(atDBFS: -80), sumOfSquares(atDBFS: -20)] {
+            let count = SilentTapWatchdog.zeroSampleCount(
+                exactZeros: 17, samples: bufferSamples, sumOfSquares: sumSq,
+            )
+            XCTAssertEqual(count, 17, "sum of squares \(sumSq)")
+        }
+    }
+
+    /// The floor only ever adds zeros. Replacing the per-sample count with a
+    /// per-buffer one would read the incident shape above as 89.6% and miss it.
+    func testTheCountIsNeverBelowTheExactCount() {
+        for dBFS in [-120.0, -98.5, -90.0, -60, 0] {
+            for exactZeros in [0, 1, 512, 1024] {
+                let count = SilentTapWatchdog.zeroSampleCount(
+                    exactZeros: exactZeros, samples: bufferSamples, sumOfSquares: sumOfSquares(atDBFS: dBFS),
+                )
+                XCTAssertGreaterThanOrEqual(count, exactZeros, "\(dBFS) dBFS, \(exactZeros) exact zeros")
+            }
+        }
+    }
+
+    func testAnEmptyBufferCountsNothing() {
+        XCTAssertEqual(SilentTapWatchdog.zeroSampleCount(exactZeros: 0, samples: 0, sumOfSquares: 0), 0)
+    }
 }

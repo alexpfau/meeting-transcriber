@@ -1,6 +1,7 @@
 import Foundation
 
-/// What fraction of the samples in the last `windowSeconds` were exactly zero.
+/// What fraction of the samples in the last `windowSeconds` were zero, as
+/// counted by the caller (`SilentTapWatchdog.zeroSampleCount` in production).
 ///
 /// Split from `SilentTapWatchdog` so the windowing is testable apart from the
 /// decision it feeds, and because `AnchorDeliveryCredit` needs the same
@@ -55,7 +56,7 @@ struct RollingZeroFraction: Equatable {
         firstObservation.map { min(now - $0, windowSeconds) }
     }
 
-    /// Fraction of observed samples that were exactly zero, or `nil` when
+    /// Fraction of observed samples counted as zero, or `nil` when
     /// nothing has been observed.
     var zeroFraction: Double? {
         let total = bins.reduce(0) { $0 + $1.totalSamples }

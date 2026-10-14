@@ -51,7 +51,7 @@ final class ChannelHealthController {
     /// the menu-bar **full red** waveform (both halves tinted simultaneously).
     private(set) var recordingSilentActive: Bool = false
 
-    /// The capture layer's rolling verdict: at least 90% exactly-zero samples
+    /// The capture layer's rolling verdict: at least 90% zero samples
     /// across a full 120-second window, clearing at 50% or less. Already
     /// windowed, so no extra debounce or microphone corroboration applies.
     /// A listening user may never speak; this is evidence worth reporting,

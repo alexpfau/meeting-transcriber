@@ -48,7 +48,7 @@ class MockRecorder: RecordingProvider {
     /// Default false, matching the protocol's default.
     var appSilentTrackWatchdogGaveUp = false
 
-    /// Whether the app-audio tap's rolling window is mostly exact zeros. Default
+    /// Whether the app-audio tap's rolling window is mostly zero samples. Default
     /// false, matching the protocol's default.
     var appCaptureDigitallySilent = false
 

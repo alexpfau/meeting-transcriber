@@ -64,6 +64,69 @@ final class AppAudioCaptureAnchorRecoveryTests: XCTestCase {
         wait(for: [settled], timeout: 3)
     }
 
+    /// Interleaved stereo at a constant magnitude, both channels equal and the
+    /// sign alternating per frame: a level with no exact zero in it anywhere,
+    /// which is what a noise floor looks like to an exact-zero count, and
+    /// which the mono downmix keeps at the same level rather than cancelling.
+    private func feed(_ capture: AppAudioCapture, level dBFS: Float, from start: Double, seconds: Double) {
+        let amplitude = powf(10, dBFS / 20)
+        var samples = (0 ..< 1000).map { ($0 / 2).isMultiple(of: 2) ? amplitude : -amplitude }
+        samples.withUnsafeMutableBytes { bytes in
+            guard let data = bytes.baseAddress else { return }
+            for index in 0 ... Int(seconds * 20) {
+                capture.accumulateDebugRMS(
+                    data: data, byteCount: bytes.count, now: start + Double(index) / 20,
+                )
+            }
+        }
+    }
+
+    /// Issue #699: a tap anchored on the wrong device carried a constant floor
+    /// around -98.5 dBFS for a whole call, never exactly zero, and in the
+    /// 16-bit file almost every sample of it was zero.
+    func testASubStepNoiseFloorMovesTheAnchor() throws {
+        let attempts = Attempts()
+        let capture = makeCapture(attempts)
+        try capture.start()
+        defer { capture.stop() }
+
+        feed(capture, level: -98.5, from: 0, seconds: 1.2)
+        XCTAssertTrue(capture.isDeliveringDigitalSilence)
+        awaitMainQueue()
+
+        XCTAssertEqual(attempts.count.withLock { $0 }, 2)
+        XCTAssertEqual(capture.currentAnchorUID.withLock { $0 }, "headphones")
+    }
+
+    /// Worse than a missed verdict: with no exact zeros in it, the floor would
+    /// earn the dead anchor the credit that makes the search offer it first.
+    func testASubStepNoiseFloorDoesNotEarnTheAnchorCredit() throws {
+        let attempts = Attempts(candidateCount: 1)
+        let capture = makeCapture(attempts)
+        try capture.start()
+        defer { capture.stop() }
+
+        feed(capture, level: -98.5, from: 0, seconds: 6)
+
+        XCTAssertNil(capture.anchorSearch.withLock(\.lastKnownGoodUID))
+    }
+
+    /// Comfort noise, a faint room: quiet, but above what a 16-bit file can
+    /// represent, so it is signal and the default keeps its place.
+    func testAQuietLevelAboveOneSixteenBitStepIsSignal() throws {
+        let attempts = Attempts()
+        let capture = makeCapture(attempts)
+        try capture.start()
+        defer { capture.stop() }
+
+        feed(capture, level: -80, from: 0, seconds: 6)
+        awaitMainQueue()
+
+        XCTAssertFalse(capture.isDeliveringDigitalSilence)
+        XCTAssertEqual(attempts.count.withLock { $0 }, 1)
+        XCTAssertEqual(capture.anchorSearch.withLock(\.lastKnownGoodUID), "default")
+    }
+
     func testMostlyZeroRawBuffersTriggerOneRestartAndSustainedAudioRecovers() throws {
         let attempts = Attempts()
         let capture = makeCapture(attempts)

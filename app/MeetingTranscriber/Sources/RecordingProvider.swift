@@ -31,8 +31,8 @@ protocol RecordingProvider {
     var appSilentTrackWatchdogGaveUp: Bool { get }
 
     /// The capture layer's rolling digital-silence verdict, independent of the
-    /// instantaneous level or microphone activity. It means mostly exact
-    /// zeros over a full observation window, not proof of a routing failure.
+    /// instantaneous level or microphone activity. It means mostly zero
+    /// samples over a full observation window, not proof of a routing failure.
     /// Default false for providers that do not simulate capture.
     var appCaptureDigitallySilent: Bool { get }
 

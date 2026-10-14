@@ -50,10 +50,11 @@ public class AudioCaptureSession {
     /// zeros. Read from the same polling path.
     public private(set) var appSilentTrackWatchdogGaveUp = false
 
-    /// True while the app-audio tap is alive but delivering buffers whose every
-    /// sample is exactly zero — the failure a virtual output driver taking over
-    /// the system default produces, which reports no error anywhere. Polled
-    /// alongside the per-channel levels; see `SilentTapWatchdog`.
+    /// True while the app-audio tap is alive but its rolling window is mostly
+    /// zero samples (exact zeros, or buffers below one 16-bit step): what a
+    /// tap anchored where the meeting app does not play delivers, with no error
+    /// anywhere. Polled alongside the per-channel levels; see
+    /// `SilentTapWatchdog`.
     public var appCaptureDigitallySilent: Bool {
         appCapture?.isDeliveringDigitalSilence ?? false
     }

@@ -31,8 +31,8 @@ import Foundation
 /// to condemn one. Five seconds matches both the existing RMS reporting cadence
 /// and the granularity of the field measurements above.
 struct AnchorDeliveryCredit: Equatable {
-    /// Longest share of exactly-zero samples an interval may hold and still
-    /// count as delivery.
+    /// Longest share of zero samples (`SilentTapWatchdog.zeroSampleCount`)
+    /// an interval may hold and still count as delivery.
     static let defaultMaxZeroFraction = 0.50
 
     /// How much audio one verdict is formed over.

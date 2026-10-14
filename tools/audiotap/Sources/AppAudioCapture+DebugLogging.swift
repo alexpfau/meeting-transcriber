@@ -43,7 +43,10 @@ extension AppAudioCapture {
         }
         debugRMS.add(sumSq: sumSq, samples: count)
         debugTotalBytes += UInt64(byteCount)
-        observeForDigitalSilence(zeroSamples: zeros, samples: count, now: now, generation: generation)
+        observeForDigitalSilence(
+            zeroSamples: SilentTapWatchdog.zeroSampleCount(exactZeros: zeros, samples: count, sumOfSquares: sumSq),
+            samples: count, now: now, generation: generation,
+        )
     }
 
     /// Drain the 5-s throttle and act on it.

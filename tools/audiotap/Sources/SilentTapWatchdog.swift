@@ -48,6 +48,20 @@ import Foundation
 /// erring toward overstating silence. A future revision should not treat the
 /// two signals as identical.
 ///
+/// **What counts as a zero sample.** An exactly-zero sample, or every sample of
+/// a buffer whose RMS is below one 16-bit step (`zeroFloorRMS`). The second
+/// half is issue #699: a tap anchored on the wrong device carried a constant
+/// floor of about -98.5 dBFS for a whole call, so its raw buffers held almost
+/// no exact zeros while the 16-bit file was almost all zeros. Counted exactly,
+/// that track reads as live, and worse, it earns the dead anchor the
+/// `AnchorDeliveryCredit` that makes the search offer it first. One 16-bit step
+/// is the resolution of the files the thresholds above were measured on, so
+/// this moves the raw count toward the measurement rather than away from it,
+/// and the thresholds stay where the corpus put them. Per buffer rather than
+/// per sample because a noise floor is not a level each sample sits under: a
+/// sample threshold at the step lets a floor just below it through on its
+/// peaks, where the buffer's RMS stays under it throughout.
+///
 /// **Why the trigger budget.** The response to a trip is a tap restart, which
 /// costs a fraction of a second of audio. An unbounded watchdog would chew a
 /// gap into a recording every window forever. Three trips per recording bounds
@@ -63,12 +77,12 @@ struct SilentTapWatchdog: Equatable {
     /// this is load-bearing and must not be shortened.
     static let defaultWindowSeconds: TimeInterval = 120
 
-    /// Share of exactly-zero samples in a full window that means the tap is
+    /// Share of zero samples in a full window that means the tap is
     /// capturing nothing. Sits in the empty gap between a healthy ceiling of
     /// 41.7% and a dead floor of 98.7%.
     static let defaultZeroFractionThreshold: Double = 0.90
 
-    /// Share of exactly-zero samples below which real signal counts as having
+    /// Share of zero samples below which real signal counts as having
     /// returned. Deliberately far under the trip threshold: without the
     /// hysteresis a window hovering at the boundary would alternate between
     /// silent and recovered from one buffer to the next.
@@ -84,6 +98,26 @@ struct SilentTapWatchdog: Equatable {
     /// digitally silent here would only race that. Set two orders of magnitude
     /// below any real capture rate, so it excludes the degenerate case alone.
     static let defaultMinSamplesPerSecond: Double = 100
+
+    /// One 16-bit step, 2^-15 (about -90.3 dBFS): a buffer whose RMS is below
+    /// it counts as zero throughout. See "What counts as a zero sample" above.
+    static let zeroFloorRMS: Double = 1.0 / 32768.0
+
+    /// How many of one buffer's samples count as zero, for this type and for
+    /// `AnchorDeliveryCredit`, from what the capture path's RMS loop already
+    /// computes. A buffer at or above the floor keeps its exact count, so
+    /// audible audio is judged exactly as before.
+    ///
+    /// The RMS is over the raw interleaved buffer, like the exact count. For
+    /// the in-phase stereo a meeting app renders, that is the level of the mono
+    /// downmix that gets written. Content that cancels in the downmix, or sits
+    /// in one channel only, is judged on the raw buffer, as the exact count
+    /// always was.
+    static func zeroSampleCount(exactZeros: Int, samples: Int, sumOfSquares: Double) -> Int {
+        guard samples > 0 else { return 0 }
+        let rms = (sumOfSquares / Double(samples)).squareRoot()
+        return rms < zeroFloorRMS ? samples : exactZeros
+    }
 
     enum Action: Equatable {
         /// The window crossed the threshold. Tell the user either way.
@@ -127,8 +161,8 @@ struct SilentTapWatchdog: Equatable {
     /// Feed one captured buffer.
     ///
     /// - Parameters:
-    ///   - zeroSamples: how many of that buffer's samples were exactly zero,
-    ///     counted in the capture path's existing RMS loop.
+    ///   - zeroSamples: how many of that buffer's samples count as zero
+    ///     (`zeroSampleCount`), counted in the capture path's RMS loop.
     ///   - samples: how many samples that buffer held.
     ///   - now: monotonic seconds. Injected rather than read here so the whole
     ///     transition table is testable without waiting out a real window.
