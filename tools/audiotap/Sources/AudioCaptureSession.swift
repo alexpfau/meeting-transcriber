@@ -49,6 +49,15 @@ public class AudioCaptureSession {
     /// unlike `appCaptureGaveUp`: the channel still captures, it captures
     /// zeros. Read from the same polling path.
     public private(set) var appSilentTrackWatchdogGaveUp = false
+
+    /// True while the app-audio tap is alive but delivering buffers whose every
+    /// sample is exactly zero — the failure a virtual output driver taking over
+    /// the system default produces, which reports no error anywhere. Polled
+    /// alongside the per-channel levels; see `SilentTapWatchdog`.
+    public var appCaptureDigitallySilent: Bool {
+        appCapture?.isDeliveringDigitalSilence ?? false
+    }
+
     private var appFileHandle: FileHandle?
 
     /// Whether the microphone's output path was free when this start reached it.
