@@ -240,4 +240,20 @@ final class AppAudioCaptureAnchorRecoveryTests: XCTestCase {
 
         XCTAssertEqual(capture.anchorSearch.withLock(\.cursor), 0)
     }
+
+    /// A default change that lands while a restart is in flight is dropped by
+    /// the restart path, but it is still a new default. Left on a fallback
+    /// position, the in-flight restart's next attempt would resolve that
+    /// position against a list now led by the new default, and skip it.
+    func testADefaultChangeTheRestartPathDropsStillResetsTheSearch() throws {
+        let capture = makeCapture(Attempts())
+        try capture.start()
+        defer { capture.stop() }
+        XCTAssertTrue(capture.anchorSearch.withLock { $0.advance(candidateCount: 3) })
+        _ = capture.deviceChangeCoordinator.handle(.deviceChanged)
+
+        capture.handleOutputDeviceChanged()
+
+        XCTAssertEqual(capture.anchorSearch.withLock(\.cursor), 0)
+    }
 }
